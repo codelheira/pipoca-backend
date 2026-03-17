@@ -1346,7 +1346,7 @@ async def get_dlna_devices():
     """
     try:
         # nanodlna discovery é síncrono, então rodamos em thread
-        found_devices = await asyncio.to_thread(devices.discover, 5)
+        found_devices = await asyncio.to_thread(devices.get_devices, 5)
         
         result = []
         for d in found_devices:
@@ -1375,7 +1375,7 @@ async def dlna_cast(device_ip: str, video_url: str):
         print(f"Casting to {device_ip}: {video_url}")
         
         # Procura o dispositivo pelo IP
-        found_devices = await asyncio.to_thread(devices.discover, 3)
+        found_devices = await asyncio.to_thread(devices.get_devices, 3)
         target = None
         for d in found_devices:
             if d.hostname == device_ip:
