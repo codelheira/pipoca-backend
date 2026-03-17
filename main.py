@@ -2704,7 +2704,7 @@ async def on_sync_command(sid, data):
     token, user_id = manager.sid_to_user[sid]
     
     if token in manager.active_transmissions:
-        if manager.active_transmissions[token]["host_id"] == user_id:
+        if manager.active_transmissions[token]["host_id"] == user_id or data.get('type') == 'user_mute_status':
             # Broadcast para todos na sala exceto quem enviou
             await sio.emit('sync_command', data, room=token, skip_sid=sid)
 
