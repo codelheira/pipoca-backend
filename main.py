@@ -1770,12 +1770,18 @@ async def transmission_ws(websocket: WebSocket, token: str, user_id: str):
                     if target_id and token in manager.active_transmissions:
                         target_info = manager.active_transmissions[token]["participants"].get(target_id)
                         if target_info and target_info["ws"]:
-                            # Envia de volta mantendo a origem
-                            await target_info["ws"].send_json({
-                                "type": "signal",
-                                "from": user_id,
-                                "signalData": message.get("signalData")
-                            })
+                            try:
+                                # Envia de volta mantendo a origem
+                                await target_info["ws"].send_json({
+                                    "type": "signal",
+                                    "from": user_id,
+                                    "signalData": message.get("signalData")
+                                })
+                            except Exception as e:
+                                logger.error(f"Erro ao encaminhar sinal WebRTC para {target_id}: {e}")
+                                # Se o socket falhou, podemos tentar limpar a conexão morta no próximo ciclo ou deixar o broadcast_state cuidar disso
+                        else:
+                            logger.info(f"Sinal ignorado: Target {target_id} não possui WebSocket ativo.")
                 
                 # Se for confirmação de que o convidado carregou o buffer
                 elif message.get("type") == "guest_ready":
