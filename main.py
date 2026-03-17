@@ -2620,6 +2620,34 @@ class TransmissionManager:
         return True
 
     async def connect(self, sid, token: str, user_id: str):
+        # Suporte especial para TV Link (Pareamento por Código)
+        if token.startswith('tv_link_'):
+            if token not in self.active_transmissions:
+                # Cria uma sala temporária "fantasma" para o pareamento
+                self.active_transmissions[token] = {
+                    "host_id": user_id,
+                    "title": "TV Link Room",
+                    "status": "waiting",
+                    "current_time": 0.0,
+                    "participants": {}
+                }
+            
+            # Adiciona participante
+            if user_id not in self.active_transmissions[token]["participants"]:
+                self.active_transmissions[token]["participants"][user_id] = {
+                    "name": "TV Receiver" if "receiver" in user_id else "Controller",
+                    "picture": "",
+                    "sid": sid,
+                    "role": "host"
+                }
+            else:
+                self.active_transmissions[token]["participants"][user_id]["sid"] = sid
+
+            self.sid_to_user[sid] = (token, user_id)
+            await sio.enter_room(sid, token)
+            logger.info(f"SIO TV-Link Connect: {user_id} na sala {token}")
+            return True
+
         if token in self.active_transmissions:
             if user_id in self.active_transmissions[token]["participants"]:
                 self.active_transmissions[token]["participants"][user_id]["sid"] = sid
