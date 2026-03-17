@@ -1,4 +1,6 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+import socketio
+
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import time
@@ -85,6 +87,11 @@ class SafeAsyncClient(httpx.AsyncClient):
         return await super().request(method, url, **kwargs)
 
 app = FastAPI(title="Pipoca Filmes API")
+
+# Setup Socket.io
+sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
+
+
 
 # Cache simples em memória: { "query": (timestamp, data) }
 search_cache = {}
@@ -1736,74 +1743,7 @@ async def debug_transmission():
         "details": {k: {"host": v["host_id"], "parts": list(v["participants"].keys())} for k, v in manager.active_transmissions.items()}
     }
 
-@app.websocket("/api/transmission/ws/{token}/{user_id}")
-async def transmission_ws(websocket: WebSocket, token: str, user_id: str):
-    # Se a sala ainda existir no servidor, mas o usuário não estiver na lista 
-    # (ex: o servidor deu reload e limpou a memória, mas o Host ou Guest tentaram reconectar),
-    # nós tentamos dar o join dele automaticamente aqui.
-    if token in manager.active_transmissions:
-        if user_id not in manager.active_transmissions[token]["participants"]:
-            print(f"WS Recovery: Tentando reinserir {user_id} na sala {token}")
-            manager.join(token, user_id, {"name": "Visitante Recuperado", "picture": ""})
-
-    success = await manager.connect(websocket, token, user_id)
-    if not success:
-        return
-        
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                message = json.loads(data)
-                
-                # Se for mensagem de sync do HOST
-                if message.get("type") in ["sync_play", "sync_pause", "sync_seek", "sync_time"]:
-                    # Verifica se quem enviou é o host
-                    if token in manager.active_transmissions:
-                        if manager.active_transmissions[token]["host_id"] == user_id:
-                            # Re-envia o comando para todos os GUESTS
-                            await manager.broadcast(token, message, exclude=user_id)
-                
-                # Se for mensagem de Signaling (WebRTC)
-                elif message.get("type") == "signal":
-                    target_id = message.get("target")
-                    if target_id and token in manager.active_transmissions:
-                        target_info = manager.active_transmissions[token]["participants"].get(target_id)
-                        if target_info and target_info["ws"]:
-                            try:
-                                # Envia de volta mantendo a origem
-                                await target_info["ws"].send_json({
-                                    "type": "signal",
-                                    "from": user_id,
-                                    "signalData": message.get("signalData")
-                                })
-                            except Exception as e:
-                                logger.error(f"Erro ao encaminhar sinal WebRTC para {target_id}: {e}")
-                                # Se o socket falhou, podemos tentar limpar a conexão morta no próximo ciclo ou deixar o broadcast_state cuidar disso
-                        else:
-                            logger.info(f"Sinal ignorado: Target {target_id} não possui WebSocket ativo.")
-                
-                # Se for confirmação de que o convidado carregou o buffer
-                elif message.get("type") == "guest_ready":
-                    if token in manager.active_transmissions:
-                        host_id = manager.active_transmissions[token]["host_id"]
-                        host_info = manager.active_transmissions[token]["participants"].get(host_id)
-                        if host_info and host_info["ws"]:
-                            await host_info["ws"].send_json({
-                                "type": "guest_ready",
-                                "user_id": user_id
-                            })
-                            
-            except json.JSONDecodeError:
-                pass
-                
-    except WebSocketDisconnect:
-        status = manager.disconnect(token, user_id)
-        if status == "leaved":
-            await manager.broadcast_state(token)
-        elif status == "closed":
-            # Força fechamento na ponta dos Guests se o Host saiu
-            await manager.broadcast(token, {"type": "room_closed"})
+# WebSockets removed in favor of Socket.io
 # -----------------------------------
 @app.get("/api/home")
 async def home_page():
@@ -2640,6 +2580,7 @@ transmissions = {}
 class TransmissionManager:
     def __init__(self):
         self.active_transmissions = {}
+        self.sid_to_user = {} # sid -> (token, user_id)
 
     def create(self, host_id: str, host_info: dict, media_title: str):
         token = str(uuid.uuid4())
@@ -2651,7 +2592,7 @@ class TransmissionManager:
             "participants": {
                 host_id: {
                     **host_info,
-                    "ws": None,
+                    "sid": None,
                     "role": "host"
                 }
             }
@@ -2673,45 +2614,44 @@ class TransmissionManager:
                 
             transmission["participants"][user_id] = {
                 **user_info,
-                "ws": None,
+                "sid": None,
                 "role": role
             }
         return True
 
-    async def connect(self, ws: WebSocket, token: str, user_id: str):
-        try:
-            await ws.accept()
-            logger.info(f"WS Attempt: {user_id} na sala {token}")
+    async def connect(self, sid, token: str, user_id: str):
+        if token in self.active_transmissions:
+            if user_id in self.active_transmissions[token]["participants"]:
+                self.active_transmissions[token]["participants"][user_id]["sid"] = sid
+                self.sid_to_user[sid] = (token, user_id)
+                await sio.enter_room(sid, token)
+                await self.broadcast_state(token)
+                logger.info(f"SIO Connect Success: {user_id} na sala {token}")
+                return True
+            else:
+                logger.warning(f"SIO Connect Error: Usuário {user_id} não encontrado na sala {token}.")
+        else:
+            logger.warning(f"SIO Connect Error: Sala {token} não existe.")
+        return False
+
+    async def disconnect(self, sid):
+        if sid in self.sid_to_user:
+            token, user_id = self.sid_to_user[sid]
+            del self.sid_to_user[sid]
             
             if token in self.active_transmissions:
-                if user_id in self.active_transmissions[token]["participants"]:
-                    self.active_transmissions[token]["participants"][user_id]["ws"] = ws
+                parts = self.active_transmissions[token]["participants"]
+                if user_id in parts:
+                    del parts[user_id]
+                    
+                    # Se o host saiu ou sala vazia, limpa a sala
+                    if user_id == self.active_transmissions[token]["host_id"] or len(parts) == 0:
+                        await sio.emit('room_closed', room=token)
+                        del self.active_transmissions[token]
+                        return "closed"
+                    
                     await self.broadcast_state(token)
-                    logger.info(f"WS Connect Success: {user_id} na sala {token}")
-                    return True
-                else:
-                    logger.warning(f"WS Connect Error: Usuário {user_id} não encontrado na sala {token}. Participantes: {list(self.active_transmissions[token]['participants'].keys())}")
-            else:
-                logger.warning(f"WS Connect Error: Sala {token} não existe. Salas ativas: {list(self.active_transmissions.keys())}")
-            
-            await ws.close()
-            return False
-        except Exception as e:
-            logger.error(f"WS Exception in connect: {e}")
-            return False
-
-    def disconnect(self, token: str, user_id: str):
-        if token in self.active_transmissions:
-            parts = self.active_transmissions[token]["participants"]
-            if user_id in parts:
-                parts[user_id]["ws"] = None
-                del parts[user_id] # Remover o usuário da sala
-                
-                # Se o host saiu ou sala vazia, limpa a sala
-                if user_id == self.active_transmissions[token]["host_id"] or len(parts) == 0:
-                    del self.active_transmissions[token]
-                    return "closed"
-                return "leaved"
+                    return "leaved"
         return "not_found"
 
     async def broadcast_state(self, token: str):
@@ -2719,7 +2659,6 @@ class TransmissionManager:
             return
             
         t = self.active_transmissions[token]
-        # Clean participants list to standard format without ws objects
         parts_data = []
         for uid, p in t["participants"].items():
             parts_data.append({
@@ -2735,35 +2674,68 @@ class TransmissionManager:
             "host_id": t["host_id"],
             "title": t["title"]
         }
-        await self.broadcast(token, msg)
-
-    async def broadcast(self, token: str, message: dict, exclude: str = None):
-        if token in self.active_transmissions:
-            parts = self.active_transmissions[token]["participants"]
-            dead_sockets = []
-            
-            for uid, p in parts.items():
-                if exclude and uid == exclude:
-                    continue
-                ws = p.get("ws")
-                if ws:
-                    try:
-                        await ws.send_json(message)
-                    except WebSocketDisconnect:
-                        dead_sockets.append(uid)
-                    except Exception as e:
-                        print(f"Broadcast error to {uid}: {e}")
-            
-            # Limpar sockets mortos
-            for uid in dead_sockets:
-                self.disconnect(token, uid)
-            
-            if dead_sockets:
-                await self.broadcast_state(token)
+        await sio.emit('state', msg, room=token)
 
 manager = TransmissionManager()
 
+@sio.event
+async def connect(sid, environ):
+    # O cliente deve passar token e user_id nos query params ou headers
+    # No socket.io client: io(url, { query: { token: '...', user_id: '...' } })
+    query = environ.get('QUERY_STRING', '')
+    params = dict(item.split('=') for item in query.split('&') if '=' in item)
+    
+    token = params.get('token')
+    user_id = params.get('user_id')
+    
+    if not token or not user_id:
+        return False # Refusa conexão
+        
+    success = await manager.connect(sid, token, user_id)
+    return success
+
+@sio.event
+async def disconnect(sid):
+    await manager.disconnect(sid)
+
+@sio.on('sync_command')
+async def on_sync_command(sid, data):
+    if sid not in manager.sid_to_user: return
+    token, user_id = manager.sid_to_user[sid]
+    
+    if token in manager.active_transmissions:
+        if manager.active_transmissions[token]["host_id"] == user_id:
+            # Broadcast para todos na sala exceto quem enviou
+            await sio.emit('sync_command', data, room=token, skip_sid=sid)
+
+@sio.on('signal')
+async def on_signal(sid, data):
+    if sid not in manager.sid_to_user: return
+    token, user_id = manager.sid_to_user[sid]
+    
+    target_id = data.get("target")
+    if target_id and token in manager.active_transmissions:
+        target_info = manager.active_transmissions[token]["participants"].get(target_id)
+        if target_info and target_info["sid"]:
+            await sio.emit('signal', {
+                "from": user_id,
+                "signalData": data.get("signalData")
+            }, room=target_info["sid"])
+
+@sio.on('guest_ready')
+async def on_guest_ready(sid, data):
+    if sid not in manager.sid_to_user: return
+    token, user_id = manager.sid_to_user[sid]
+    
+    if token in manager.active_transmissions:
+        host_id = manager.active_transmissions[token]["host_id"]
+        host_info = manager.active_transmissions[token]["participants"].get(host_id)
+        if host_info and host_info["sid"]:
+            await sio.emit('guest_ready', {"user_id": user_id}, room=host_info["sid"])
+
+# Final app setup: Wrap FastAPI with Socket.io
+app = socketio.ASGIApp(sio, other_asgi_app=app)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

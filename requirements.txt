@@ -1,5 +1,7 @@
-fastapi
+python-socketio
+python-engineio
 uvicorn[standard]
+fastapi
 httpx
 google-auth
 python-jose[cryptography]
