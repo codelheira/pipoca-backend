@@ -1648,9 +1648,145 @@ async def get_discussions(tipo: str, tmdb_id: str):
             print(f"Erro ao buscar discussões: {e}")
             return []
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+# --- W2G TRANSMISSION SYSTEM ---
+from pydantic import BaseModel
+
+class CreateTransmissionRequest(BaseModel):
+    title: str
+    user_id: str = None
+    user_name: str = None
+    
+class JoinTransmissionRequest(BaseModel):
+    token: str
+    user_id: str = None
+    user_name: str = None
+
+@app.post("/api/transmission/create")
+async def create_transmission(req: CreateTransmissionRequest, current_user: dict = Depends(get_current_user)):
+    users = load_users()
+    
+    if current_user:
+        google_id = current_user.get("sub")
+        user_info = users.get(google_id)
+        if not user_info:
+            user_info = {
+                "name": current_user.get("name", "Usuário"),
+                "picture": current_user.get("picture", "")
+            }
+    else:
+        # Usuário Anônimo ou ID vindo do frontend
+        google_id = req.user_id or f"anon_{uuid.uuid4().hex[:8]}"
+        user_info = {
+            "name": req.user_name or "Pipoca Anônimo",
+            "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={google_id}"
+        }
+        
+    token = manager.create(google_id, user_info, req.title)
+    return {"token": token, "url": f"/player?transmission={token}"}
+
+@app.post("/api/transmission/join")
+async def join_transmission(req: JoinTransmissionRequest, current_user: dict = Depends(get_current_user)):
+    users = load_users()
+    
+    if current_user:
+        google_id = current_user.get("sub")
+        user_info = users.get(google_id)
+        if not user_info:
+            user_info = {
+                "name": current_user.get("name", "Usuário"),
+                "picture": current_user.get("picture", "")
+            }
+    else:
+        # Usuário Anônimo ou ID vindo do frontend
+        google_id = req.user_id or f"anon_{uuid.uuid4().hex[:8]}"
+        user_info = {
+            "name": req.user_name or "Pipoca Anônimo",
+            "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={google_id}"
+        }
+        
+    success = manager.join(req.token, google_id, user_info)
+    if not success:
+        raise HTTPException(status_code=400, detail="Sala cheia ou inválida")
+        
+    room_info = manager.active_transmissions.get(req.token)
+    role = "host" if room_info.get("host_id") == google_id else "guest"
+        
+    logger.info(f"Join Success: {google_id} na sala {req.token} como {role}")
+    return {"token": req.token, "role": role}
+
+@app.get("/api/transmission/debug")
+async def debug_transmission():
+    """Endpoint para debugar o estado das salas em produção"""
+    return {
+        "active_rooms": list(manager.active_transmissions.keys()),
+        "room_count": len(manager.active_transmissions),
+        "details": {k: {"host": v["host_id"], "parts": list(v["participants"].keys())} for k, v in manager.active_transmissions.items()}
+    }
+
+@app.websocket("/api/transmission/ws/{token}/{user_id}")
+async def transmission_ws(websocket: WebSocket, token: str, user_id: str):
+    # Se a sala ainda existir no servidor, mas o usuário não estiver na lista 
+    # (ex: o servidor deu reload e limpou a memória, mas o Host ou Guest tentaram reconectar),
+    # nós tentamos dar o join dele automaticamente aqui.
+    if token in manager.active_transmissions:
+        if user_id not in manager.active_transmissions[token]["participants"]:
+            print(f"WS Recovery: Tentando reinserir {user_id} na sala {token}")
+            manager.join(token, user_id, {"name": "Visitante Recuperado", "picture": ""})
+
+    success = await manager.connect(websocket, token, user_id)
+    if not success:
+        return
+        
+    try:
+        while True:
+            data = await websocket.receive_text()
+            try:
+                message = json.loads(data)
+                
+                # Se for mensagem de sync do HOST
+                if message.get("type") in ["sync_play", "sync_pause", "sync_seek", "sync_time"]:
+                    # Verifica se quem enviou é o host
+                    if token in manager.active_transmissions:
+                        if manager.active_transmissions[token]["host_id"] == user_id:
+                            # Re-envia o comando para todos os GUESTS
+                            await manager.broadcast(token, message, exclude=user_id)
+                
+                # Se for mensagem de Signaling (WebRTC)
+                elif message.get("type") == "signal":
+                    target_id = message.get("target")
+                    if target_id and token in manager.active_transmissions:
+                        target_info = manager.active_transmissions[token]["participants"].get(target_id)
+                        if target_info and target_info["ws"]:
+                            # Envia de volta mantendo a origem
+                            await target_info["ws"].send_json({
+                                "type": "signal",
+                                "from": user_id,
+                                "signalData": message.get("signalData")
+                            })
+                
+                # Se for confirmação de que o convidado carregou o buffer
+                elif message.get("type") == "guest_ready":
+                    if token in manager.active_transmissions:
+                        host_id = manager.active_transmissions[token]["host_id"]
+                        host_info = manager.active_transmissions[token]["participants"].get(host_id)
+                        if host_info and host_info["ws"]:
+                            await host_info["ws"].send_json({
+                                "type": "guest_ready",
+                                "user_id": user_id
+                            })
+                            
+            except json.JSONDecodeError:
+                pass
+                
+    except WebSocketDisconnect:
+        status = manager.disconnect(token, user_id)
+        if status == "leaved":
+            await manager.broadcast_state(token)
+        elif status == "closed":
+            # Força fechamento na ponta dos Guests se o Host saiu
+            await manager.broadcast(token, {"type": "room_closed"})
+# -----------------------------------
 @app.get("/api/home")
 async def home_page():
     """
@@ -2609,139 +2745,7 @@ class TransmissionManager:
 
 manager = TransmissionManager()
 
-from pydantic import BaseModel
 
-class CreateTransmissionRequest(BaseModel):
-    title: str
-    user_id: str = None
-    user_name: str = None
-    
-class JoinTransmissionRequest(BaseModel):
-    token: str
-    user_id: str = None
-    user_name: str = None
-
-@app.post("/api/transmission/create")
-async def create_transmission(req: CreateTransmissionRequest, current_user: dict = Depends(get_current_user)):
-    users = load_users()
-    
-    if current_user:
-        google_id = current_user.get("sub")
-        user_info = users.get(google_id)
-        if not user_info:
-            user_info = {
-                "name": current_user.get("name", "Usuário"),
-                "picture": current_user.get("picture", "")
-            }
-    else:
-        # Usuário Anônimo ou ID vindo do frontend
-        google_id = req.user_id or f"anon_{uuid.uuid4().hex[:8]}"
-        user_info = {
-            "name": req.user_name or "Pipoca Anônimo",
-            "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={google_id}"
-        }
-        
-    token = manager.create(google_id, user_info, req.title)
-    return {"token": token, "url": f"/player?transmission={token}"}
-
-@app.post("/api/transmission/join")
-async def join_transmission(req: JoinTransmissionRequest, current_user: dict = Depends(get_current_user)):
-    users = load_users()
-    
-    if current_user:
-        google_id = current_user.get("sub")
-        user_info = users.get(google_id)
-        if not user_info:
-            user_info = {
-                "name": current_user.get("name", "Usuário"),
-                "picture": current_user.get("picture", "")
-            }
-    else:
-        # Usuário Anônimo ou ID vindo do frontend
-        google_id = req.user_id or f"anon_{uuid.uuid4().hex[:8]}"
-        user_info = {
-            "name": req.user_name or "Pipoca Anônimo",
-            "picture": f"https://api.dicebear.com/7.x/avataaars/svg?seed={google_id}"
-        }
-        
-    success = manager.join(req.token, google_id, user_info)
-    if not success:
-        raise HTTPException(status_code=400, detail="Sala cheia ou inválida")
-        
-    room_info = manager.active_transmissions.get(req.token)
-    role = "host" if room_info.get("host_id") == google_id else "guest"
-        
-    logger.info(f"Join Success: {google_id} na sala {req.token} como {role}")
-    return {"token": req.token, "role": role}
-
-@app.get("/api/transmission/debug")
-async def debug_transmission():
-    """Endpoint para debugar o estado das salas em produção"""
-    return {
-        "active_rooms": list(manager.active_transmissions.keys()),
-        "room_count": len(manager.active_transmissions),
-        "details": {k: {"host": v["host_id"], "parts": list(v["participants"].keys())} for k, v in manager.active_transmissions.items()}
-    }
-
-@app.websocket("/api/transmission/ws/{token}/{user_id}")
-async def transmission_ws(websocket: WebSocket, token: str, user_id: str):
-    # Se a sala ainda existir no servidor, mas o usuário não estiver na lista 
-    # (ex: o servidor deu reload e limpou a memória, mas o Host ou Guest tentaram reconectar),
-    # nós tentamos dar o join dele automaticamente aqui.
-    if token in manager.active_transmissions:
-        if user_id not in manager.active_transmissions[token]["participants"]:
-            print(f"WS Recovery: Tentando reinserir {user_id} na sala {token}")
-            manager.join(token, user_id, {"name": "Visitante Recuperado", "picture": ""})
-
-    success = await manager.connect(websocket, token, user_id)
-    if not success:
-        return
-        
-    try:
-        while True:
-            data = await websocket.receive_text()
-            try:
-                message = json.loads(data)
-                
-                # Se for mensagem de sync do HOST
-                if message.get("type") in ["sync_play", "sync_pause", "sync_seek", "sync_time"]:
-                    # Verifica se quem enviou é o host
-                    if token in manager.active_transmissions:
-                        if manager.active_transmissions[token]["host_id"] == user_id:
-                            # Re-envia o comando para todos os GUESTS
-                            await manager.broadcast(token, message, exclude=user_id)
-                
-                # Se for mensagem de Signaling (WebRTC)
-                elif message.get("type") == "signal":
-                    target_id = message.get("target")
-                    if target_id and token in manager.active_transmissions:
-                        target_info = manager.active_transmissions[token]["participants"].get(target_id)
-                        if target_info and target_info["ws"]:
-                            # Envia de volta mantendo a origem
-                            await target_info["ws"].send_json({
-                                "type": "signal",
-                                "from": user_id,
-                                "signalData": message.get("signalData")
-                            })
-                
-                # Se for confirmação de que o convidado carregou o buffer
-                elif message.get("type") == "guest_ready":
-                    if token in manager.active_transmissions:
-                        host_id = manager.active_transmissions[token]["host_id"]
-                        host_info = manager.active_transmissions[token]["participants"].get(host_id)
-                        if host_info and host_info["ws"]:
-                            await host_info["ws"].send_json({
-                                "type": "guest_ready",
-                                "user_id": user_id
-                            })
-                            
-            except json.JSONDecodeError:
-                pass
-                
-    except WebSocketDisconnect:
-        status = manager.disconnect(token, user_id)
-        if status == "leaved":
-            await manager.broadcast_state(token)
-        elif status == "closed":
-            # Força fechamento na ponta dos Guests se o Host saiu
-            await manager.broadcast(token, {"type": "room_closed"})
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
