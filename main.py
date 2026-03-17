@@ -2620,11 +2620,14 @@ class TransmissionManager:
         return True
 
     async def connect(self, sid, token: str, user_id: str):
-        # Suporte especial para TV Link (Pareamento por Código)
-        if token.startswith('tv_link_'):
-            if token not in self.active_transmissions:
+        # Normalização do token para TV Link (Pareamento por Código)
+        # Se for um sender, ele deve cair na mesma sala do receiver
+        room_token = token.replace('sender_', '')
+        
+        if room_token.startswith('tv_link_'):
+            if room_token not in self.active_transmissions:
                 # Cria uma sala temporária "fantasma" para o pareamento
-                self.active_transmissions[token] = {
+                self.active_transmissions[room_token] = {
                     "host_id": user_id,
                     "title": "TV Link Room",
                     "status": "waiting",
@@ -2633,19 +2636,19 @@ class TransmissionManager:
                 }
             
             # Adiciona participante
-            if user_id not in self.active_transmissions[token]["participants"]:
-                self.active_transmissions[token]["participants"][user_id] = {
+            if user_id not in self.active_transmissions[room_token]["participants"]:
+                self.active_transmissions[room_token]["participants"][user_id] = {
                     "name": "TV Receiver" if "receiver" in user_id else "Controller",
                     "picture": "",
                     "sid": sid,
                     "role": "host"
                 }
             else:
-                self.active_transmissions[token]["participants"][user_id]["sid"] = sid
+                self.active_transmissions[room_token]["participants"][user_id]["sid"] = sid
 
-            self.sid_to_user[sid] = (token, user_id)
-            await sio.enter_room(sid, token)
-            logger.info(f"SIO TV-Link Connect: {user_id} na sala {token}")
+            self.sid_to_user[sid] = (room_token, user_id)
+            await sio.enter_room(sid, room_token)
+            logger.info(f"SIO TV-Link Connect: {user_id} na sala {room_token}")
             return True
 
         if token in self.active_transmissions:
@@ -2708,16 +2711,18 @@ manager = TransmissionManager()
 
 @sio.event
 async def connect(sid, environ):
-    # O cliente deve passar token e user_id nos query params ou headers
-    # No socket.io client: io(url, { query: { token: '...', user_id: '...' } })
+    # Tenta obter query params dos headers do Socket.io se disponíveis, 
+    # senão faz o parsing manual da QUERY_STRING
     query = environ.get('QUERY_STRING', '')
-    params = dict(item.split('=') for item in query.split('&') if '=' in item)
+    from urllib.parse import parse_qs
+    params = {k: v[0] for k, v in parse_qs(query).items()}
     
     token = params.get('token')
     user_id = params.get('user_id')
     
     if not token or not user_id:
-        return False # Refusa conexão
+        logger.warning(f"Connection rejected: missing token or user_id in {params}")
+        return False
         
     success = await manager.connect(sid, token, user_id)
     return success
