@@ -2737,7 +2737,12 @@ async def on_sync_command(sid, data):
     token, user_id = manager.sid_to_user[sid]
     
     if token in manager.active_transmissions:
-        if manager.active_transmissions[token]["host_id"] == user_id or data.get('type') == 'user_mute_status':
+        # Se for uma sala de TV Link, permitimos o comando de qualquer um (celular ou TV)
+        # Se for Watch2Gether normal, apenas o Host pode comandar.
+        is_tv_link = token.startswith('tv_link_')
+        is_host = manager.active_transmissions[token]["host_id"] == user_id
+        
+        if is_tv_link or is_host or data.get('type') == 'user_mute_status':
             # Broadcast para todos na sala exceto quem enviou
             await sio.emit('sync_command', data, room=token, skip_sid=sid)
 
