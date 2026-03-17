@@ -142,6 +142,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Debug middleware para ver o que chega no servidor (inclusive WebSockets)
+@app.middleware("http")
+async def log_http(request: Request, call_next):
+    logger.info(f"HTTP REQ: {request.method} {request.url.path}")
+    return await call_next(request)
+
+@app.websocket("/ws")
+async def test_websocket(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_text("WS Alive")
+    await websocket.close()
+
 @app.get("/api/search/{query}")
 async def search_proxy(query: str):
     """
