@@ -9,3 +9,4 @@ nanodlna
 beautifulsoup4
 python-dotenv
 requests
+websockets
