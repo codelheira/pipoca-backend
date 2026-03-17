@@ -13,6 +13,11 @@ import os
 import uuid
 from auth import verify_google_token, create_access_token, get_current_user, GOOGLE_CLIENT_ID
 from fastapi import Depends
+import logging
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("pipoca-api")
 
 # Helper para resolver DNS se o sistema falhar (problema comum em alguns provedores)
 _dns_cache = {}
@@ -2520,20 +2525,26 @@ class TransmissionManager:
         return True
 
     async def connect(self, ws: WebSocket, token: str, user_id: str):
-        await ws.accept()
-        if token in self.active_transmissions:
-            if user_id in self.active_transmissions[token]["participants"]:
-                self.active_transmissions[token]["participants"][user_id]["ws"] = ws
-                await self.broadcast_state(token)
-                print(f"WS: {user_id} conectado na sala {token}")
-                return True
+        try:
+            await ws.accept()
+            logger.info(f"WS Attempt: {user_id} na sala {token}")
+            
+            if token in self.active_transmissions:
+                if user_id in self.active_transmissions[token]["participants"]:
+                    self.active_transmissions[token]["participants"][user_id]["ws"] = ws
+                    await self.broadcast_state(token)
+                    logger.info(f"WS Connect Success: {user_id} na sala {token}")
+                    return True
+                else:
+                    logger.warning(f"WS Connect Error: Usuário {user_id} não encontrado na sala {token}. Participantes: {list(self.active_transmissions[token]['participants'].keys())}")
             else:
-                print(f"WS Erro: Usuário {user_id} não encontrado nos participantes da sala {token}")
-        else:
-            print(f"WS Erro: Sala {token} não existe mais (Servidor pode ter reiniciado)")
-        
-        await ws.close()
-        return False
+                logger.warning(f"WS Connect Error: Sala {token} não existe. Salas ativas: {list(self.active_transmissions.keys())}")
+            
+            await ws.close()
+            return False
+        except Exception as e:
+            logger.error(f"WS Exception in connect: {e}")
+            return False
 
     def disconnect(self, token: str, user_id: str):
         if token in self.active_transmissions:
@@ -2660,7 +2671,17 @@ async def join_transmission(req: JoinTransmissionRequest, current_user: dict = D
     room_info = manager.active_transmissions.get(req.token)
     role = "host" if room_info.get("host_id") == google_id else "guest"
         
+    logger.info(f"Join Success: {google_id} na sala {req.token} como {role}")
     return {"token": req.token, "role": role}
+
+@app.get("/api/transmission/debug")
+async def debug_transmission():
+    """Endpoint para debugar o estado das salas em produção"""
+    return {
+        "active_rooms": list(manager.active_transmissions.keys()),
+        "room_count": len(manager.active_transmissions),
+        "details": {k: {"host": v["host_id"], "parts": list(v["participants"].keys())} for k, v in manager.active_transmissions.items()}
+    }
 
 @app.websocket("/api/transmission/ws/{token}/{user_id}")
 async def transmission_ws(websocket: WebSocket, token: str, user_id: str):
