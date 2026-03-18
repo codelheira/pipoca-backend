@@ -2674,15 +2674,11 @@ class TransmissionManager:
                 t = self.active_transmissions[token]
                 parts = t["participants"]
                 if user_id in parts:
-                    if user_id == t["host_id"]:
-                        # Se o host desconectar acidentalmente, não matamos a sala.
-                        # Apenas limpamos o sid para permitir reconexão.
-                        parts[user_id]["sid"] = None
-                    else:
-                        # Convidados que saem são removidos normalmente
-                        del parts[user_id]
+                    # NUNCA deletamos um participante automaticamente em disconnect
+                    # Apenas limpamos o SID para permitir reconexão (refresh ou oscilação de rede)
+                    parts[user_id]["sid"] = None
                     
-                    # Checa se a sala ficou totalmente deserta (ninguém com sid ativo)
+                    # Se todos os participantes (host e guests) estiverem sem SID, matamos a sala por inatividade
                     has_active = any(p.get("sid") is not None for p in parts.values())
                     if not has_active:
                         # Se não há alma viva online, enterra a sala.
