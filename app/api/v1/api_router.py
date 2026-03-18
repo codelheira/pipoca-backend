@@ -1,3 +1,4 @@
+from fastapi import APIRouter
 from .endpoints import search, movies, series, auth, user_data
 
 api_v1_router = APIRouter()
