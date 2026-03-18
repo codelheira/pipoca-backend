@@ -34,7 +34,7 @@ async def scrape_featured_from_home():
     return list(pool.values())
 
 async def scrape_series_for_home():
-    categories = ["series-legendadas", "series-dubladas"]
+    categories = ["series", "series-legendadas", "series-dubladas"]
     pool = {}
     
     async def fetch_cat(cat):
@@ -58,7 +58,8 @@ async def scrape_series_for_home():
 @router.get("")
 async def get_home():
     """Retorna o conteúdo da Home Page com Destaques, Mais Assistidos e Lançamentos."""
-    cached = cache.get("home_v1")
+    cache_key = "home_v2" # Atualizado para forçar refresh com novos campos
+    cached = cache.get(cache_key)
     if cached:
         return cached
 
@@ -79,5 +80,5 @@ async def get_home():
         "series": enriched_series[:10]
     }
     
-    cache.set("home_v1", data, custom_expiration=3600) # 1h cache
+    cache.set(cache_key, data, custom_expiration=3600) # 1h cache
     return data
