@@ -4,7 +4,17 @@ services:
     plan: free
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker app.main:sio_app --bind 0.0.0.0:$PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.10.0
+      - key: GOOGLE_CLIENT_ID
+        value: 1009476650697-5a9o83b0ngq5e1o6e5kkq89vlp5f8hp2.apps.googleusercontent.com
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false # Set manually in Render Dashboard for security
+      - key: SUPABASE_URL
+        value: https://qqocgsunahqvabmrfmiu.supabase.co
+      - key: SUPABASE_KEY
+        sync: false # Set manually in Render Dashboard for security
+      - key: SECRET_KEY
+        generateValue: true # Generates a random secure key if not set
