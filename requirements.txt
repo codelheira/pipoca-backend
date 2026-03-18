@@ -15,3 +15,4 @@ websockets
 pydantic>=2.0
 pydantic-settings
 supabase
+email-validator
