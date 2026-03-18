@@ -145,3 +145,39 @@ async def get_all_movies(page: int = Query(1, ge=1)):
         "has_more": end < len(full_results),
         "total": len(full_results)
     }
+
+@router.get("/stream")
+async def get_stream_url(url: str):
+    """Tenta extrair a URL direta de vídeo de um player de iframe."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Referer": f"{settings.PROVIDERS['ASSISTIR']}/"
+    }
+    
+    async with SafeAsyncClient(follow_redirects=True) as client:
+        try:
+            res = await client.get(url, headers=headers, timeout=15.0)
+            if res.status_code == 200:
+                html = res.text
+                
+                # Procura por HLS/M3U8
+                m3u8_match = re.search(r'["\'](https?://[^"\']+\.m3u8[^"\']*)["\']', html)
+                if m3u8_match:
+                    return {"url": m3u8_match.group(1)}
+                
+                # Procura por MP4 em source tags
+                soup = BeautifulSoup(html, 'html.parser')
+                source = soup.find('source')
+                if source and source.get('src'):
+                    return {"url": source['src']}
+                
+                # Procura por scripts que definem 'file'
+                file_match = re.search(r'file\s*:\s*["\'](https?://[^"\']+)["\']', html)
+                if file_match:
+                    return {"url": file_match.group(1)}
+                    
+        except Exception as e:
+            logger.error(f"Error extracting stream: {e}")
+            
+    # Se falhar, retorna a URL original para o player tentar lidar
+    return {"url": url}
