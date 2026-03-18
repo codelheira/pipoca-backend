@@ -16,7 +16,12 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     
-    CORS_ORIGINS: List[str] = ["*"]
+    CORS_ORIGINS: List[str] = [
+        "https://pipocafilmes.pages.dev",
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "*" # Mantemos o * caso você queira desativar credentials depois, mas por agora o FastAPI usará os acima.
+    ]
     
     TMDB_KEYS: List[str] = [
         'fb7bb23f03b6994dafc674c074d01761', 'e55425032d3d0f371fc776f302e7c09b',

@@ -18,9 +18,13 @@ apply_dns_patch()
 app = FastAPI(title=settings.PROJECT_NAME)
 
 # Middleware de CORS
+# Se permitirmos credentials, precisamos de origens explícitas.
+origins = [o for o in settings.CORS_ORIGINS if o != "*"]
+allow_all = "*" in settings.CORS_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
+    allow_origins=origins if (origins and True) else ["*"], # Prioriza os específicos
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
