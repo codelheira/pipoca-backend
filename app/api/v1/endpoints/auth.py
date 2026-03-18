@@ -38,22 +38,30 @@ async def google_auth(auth_req: GoogleAuthRequest):
                 "email": user_info["email"],
                 "name": user_info["name"],
                 "picture": user_info["picture"],
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": time.time(), # Usando timestamp float compatível com o modelo
                 "favorites": [],
                 "history": []
             }
-            ins_res = supabase.table("users").insert(new_user).execute()
-            user_data = ins_res.data[0]
-            logger.info(f"New user registered: {user_info['email']}")
+            try:
+                ins_res = supabase.table("users").insert(new_user).execute()
+                user_data = ins_res.data[0]
+                logger.info(f"New user registered: {user_info['email']}")
+            except Exception as e:
+                logger.error(f"Erro ao inserir novo usuário no Supabase: {e}")
+                raise
         else:
             # Login: atualiza informações básicas
             update_data = {
                 "name": user_info["name"],
                 "picture": user_info["picture"]
             }
-            up_res = supabase.table("users").update(update_data).eq("id", google_id).execute()
-            user_data = up_res.data[0]
-            logger.info(f"User login: {user_info['email']}")
+            try:
+                up_res = supabase.table("users").update(update_data).eq("id", google_id).execute()
+                user_data = up_res.data[0]
+                logger.info(f"User login: {user_info['email']}")
+            except Exception as e:
+                logger.error(f"Erro ao atualizar usuário no Supabase: {e}")
+                raise
             
         access_token = create_access_token(data={"sub": google_id, "email": user_info["email"]})
         
@@ -64,8 +72,8 @@ async def google_auth(auth_req: GoogleAuthRequest):
         )
         
     except Exception as e:
-        logger.error(f"Supabase Auth Error: {e}")
-        raise HTTPException(status_code=500, detail="Erro interno ao sincronizar com banco de dados.")
+        logger.error(f"Supabase Auth Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Erro no banco de dados: {str(e)}")
 
 @router.get("/me", response_model=UserBase)
 async def get_me(current_user: dict = Depends(get_current_user)):
