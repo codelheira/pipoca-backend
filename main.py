@@ -2694,32 +2694,13 @@ class TransmissionManager:
                     return "leaved"
         return "not_found"
 
-@sio.on('leave_transmission')
-async def on_leave_transmission(sid):
-    if sid not in manager.sid_to_user: return
-    token, user_id = manager.sid_to_user[sid]
-    
-    if token in manager.active_transmissions:
-        t = manager.active_transmissions[token]
-        if user_id == t["host_id"]:
-            # Saída deliberada do Host: enterra a sala e avisa geral
-            await sio.emit('room_closed', room=token)
-            if token in manager.active_transmissions:
-                del manager.active_transmissions[token]
-        else:
-            # Saída deliberada de um convidado
-            if user_id in t["participants"]:
-                del t["participants"][user_id]
-            await manager.broadcast_state(token)
-
-
     async def broadcast_state(self, token: str):
         if token not in self.active_transmissions:
             return
             
         t = self.active_transmissions[token]
         parts_data = []
-        for uid, p in t["participants"].items():
+        for uid, p in t.get("participants", {}).items():
             parts_data.append({
                 "id": uid,
                 "name": p.get("name", "Unknown"),
@@ -2736,6 +2717,27 @@ async def on_leave_transmission(sid):
         await sio.emit('state', msg, room=token)
 
 manager = TransmissionManager()
+
+@sio.on('leave_transmission')
+async def on_leave_transmission(sid):
+    if sid not in manager.sid_to_user: return
+    token, user_id = manager.sid_to_user[sid]
+    
+    if token in manager.active_transmissions:
+        t = manager.active_transmissions[token]
+        if user_id == t["host_id"]:
+            # Saída deliberada do Host: enterra a sala e avisa geral
+            await sio.emit('room_closed', room=token)
+            if token in manager.active_transmissions:
+                del manager.active_transmissions[token]
+            logger.info(f"Room Closed by Host: {token}")
+        else:
+            # Saída deliberada de um convidado
+            if user_id in t["participants"]:
+                del t["participants"][user_id]
+            logger.info(f"Participant Leaved: {user_id} in {token}")
+            await manager.broadcast_state(token)
+
 
 @sio.event
 async def connect(sid, environ):
