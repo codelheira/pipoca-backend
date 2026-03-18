@@ -95,6 +95,12 @@ async def enrich_item_list(items: List[Dict[str, Any]], media_type: str = "multi
             if best_match.get("poster_path"):
                 item["capa"] = f"https://image.tmdb.org/t/p/w500{best_match['poster_path']}"
             
+            if best_match.get("backdrop_path"):
+                item["backdrop"] = f"https://image.tmdb.org/t/p/original{best_match['backdrop_path']}"
+            
+            if best_match.get("overview"):
+                item["sinopse"] = best_match["overview"]
+            
             if best_match.get("vote_average"):
                 item["nota"] = str(round(best_match["vote_average"], 1))
                 
