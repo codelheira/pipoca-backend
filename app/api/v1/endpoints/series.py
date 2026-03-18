@@ -187,3 +187,49 @@ async def get_serie_episodio(slug: str, num: int, ep: int):
     target_ep.player_url = iframe_url
     
     return target_ep
+
+@router.get("/all", response_model=dict)
+async def get_all_series(page: int = Query(1, ge=1)):
+    """
+    Lista todas as séries com paginação e enriquecimento TMDB.
+    """
+    cache_key_full = "series_all_full_list"
+    full_results = cache.get(cache_key_full)
+    
+    if not full_results:
+        categorias = ["series", "series-dubladas", "series-legendadas", "series-atualizadas"]
+        series_dict = {}
+        
+        async def fetch_cat(cat):
+            url = f"{settings.PROVIDERS['ASSISTIR']}/categoria/{cat}"
+            async with SafeAsyncClient() as client:
+                try:
+                    res = await client.get(url, timeout=20.0)
+                    if res.status_code == 200:
+                        soup = BeautifulSoup(res.text, 'html.parser')
+                        for card in soup.find_all('div', class_='card'):
+                            slug = card.get('id', '')
+                            if not slug: continue
+                            title_tag = card.find('h3', class_='card__title')
+                            name = title_tag.get_text().strip() if title_tag else slug
+                            series_dict[slug] = {"nome": name, "slug": slug, "tipo": "serie"}
+                except: pass
+
+        await asyncio.gather(*(fetch_cat(c) for c in categorias))
+        full_results = list(series_dict.values())
+        cache.set(cache_key_full, full_results, custom_expiration=3600) # 1h cache
+
+    # Paginação
+    per_page = 24
+    start = (page - 1) * per_page
+    end = start + per_page
+    page_items = full_results[start:end]
+    
+    enriched_items = await enrich_item_list(page_items)
+    
+    return {
+        "items": enriched_items,
+        "page": page,
+        "has_more": end < len(full_results),
+        "total": len(full_results)
+    }
