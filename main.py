@@ -2671,19 +2671,47 @@ class TransmissionManager:
             del self.sid_to_user[sid]
             
             if token in self.active_transmissions:
-                parts = self.active_transmissions[token]["participants"]
+                t = self.active_transmissions[token]
+                parts = t["participants"]
                 if user_id in parts:
-                    del parts[user_id]
+                    if user_id == t["host_id"]:
+                        # Se o host desconectar acidentalmente, não matamos a sala.
+                        # Apenas limpamos o sid para permitir reconexão.
+                        parts[user_id]["sid"] = None
+                    else:
+                        # Convidados que saem são removidos normalmente
+                        del parts[user_id]
                     
-                    # Se o host saiu ou sala vazia, limpa a sala
-                    if user_id == self.active_transmissions[token]["host_id"] or len(parts) == 0:
-                        await sio.emit('room_closed', room=token)
-                        del self.active_transmissions[token]
+                    # Checa se a sala ficou totalmente deserta (ninguém com sid ativo)
+                    has_active = any(p.get("sid") is not None for p in parts.values())
+                    if not has_active:
+                        # Se não há alma viva online, enterra a sala.
+                        if token in self.active_transmissions:
+                            del self.active_transmissions[token]
                         return "closed"
                     
                     await self.broadcast_state(token)
                     return "leaved"
         return "not_found"
+
+@sio.on('leave_transmission')
+async def on_leave_transmission(sid):
+    if sid not in manager.sid_to_user: return
+    token, user_id = manager.sid_to_user[sid]
+    
+    if token in manager.active_transmissions:
+        t = manager.active_transmissions[token]
+        if user_id == t["host_id"]:
+            # Saída deliberada do Host: enterra a sala e avisa geral
+            await sio.emit('room_closed', room=token)
+            if token in manager.active_transmissions:
+                del manager.active_transmissions[token]
+        else:
+            # Saída deliberada de um convidado
+            if user_id in t["participants"]:
+                del t["participants"][user_id]
+            await manager.broadcast_state(token)
+
 
     async def broadcast_state(self, token: str):
         if token not in self.active_transmissions:
